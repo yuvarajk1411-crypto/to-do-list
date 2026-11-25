@@ -3,7 +3,6 @@
 
   const STORAGE_KEY = "taskflow.tasks.v1";
   const THEME_KEY = "taskflow.theme.v1";
-
   const PRIORITY_WEIGHT = { high: 3, medium: 2, low: 1 };
 
   const state = {
@@ -13,9 +12,13 @@
     priorityFilter: "all",
     categoryFilter: "all",
     sortBy: "manual",
-    undoSnapshot: null,
+    undoAction: null,
     toastTimer: null,
     draggedId: null,
+    supabase: null,
+    user: null,
+    authMode: "signin",
+    syncing: false,
   };
 
   // DOM references
@@ -24,6 +27,11 @@
     themeToggle: document.getElementById("theme-toggle"),
     exportBtn: document.getElementById("export-btn"),
     importInput: document.getElementById("import-input"),
+    syncDot: document.getElementById("sync-dot"),
+    syncStatusText: document.getElementById("sync-status-text"),
+    authOpenBtn: document.getElementById("auth-open-btn"),
+    signoutBtn: document.getElementById("signout-btn"),
+    footerStorageNote: document.getElementById("footer-storage-note"),
     statTotal: document.getElementById("stat-total"),
     statActive: document.getElementById("stat-active"),
     statCompleted: document.getElementById("stat-completed"),
@@ -58,6 +66,16 @@
     editNotes: document.getElementById("edit-notes"),
     closeModalBtn: document.getElementById("close-modal-btn"),
     cancelEditBtn: document.getElementById("cancel-edit-btn"),
+    authModal: document.getElementById("auth-modal"),
+    authForm: document.getElementById("auth-form"),
+    authEmail: document.getElementById("auth-email"),
+    authPassword: document.getElementById("auth-password"),
+    authFeedback: document.getElementById("auth-feedback"),
+    authHint: document.getElementById("auth-hint"),
+    authSubmitBtn: document.getElementById("auth-submit-btn"),
+    authModeTabs: Array.from(document.querySelectorAll(".auth-tab-btn")),
+    closeAuthBtn: document.getElementById("close-auth-btn"),
+    cancelAuthBtn: document.getElementById("cancel-auth-btn"),
     toast: document.getElementById("toast"),
     toastMessage: document.getElementById("toast-message"),
     toastAction: document.getElementById("toast-action"),
@@ -78,7 +96,7 @@
     return `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
-  function loadTasks() {
+  function loadLocalTasks() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return [];
@@ -89,8 +107,63 @@
     }
   }
 
-  function saveTasks() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks));
+  function saveLocalTasks() {
+    if (!state.user) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.tasks));
+    }
+  }
+
+  function rowToTask(row) {
+    return {
+      id: row.id,
+      title: row.title,
+      priority: row.priority || "medium",
+      dueDate: row.due_date || "",
+      category: row.category || "",
+      notes: row.notes || "",
+      completed: Boolean(row.completed),
+      position: typeof row.position === "number" ? row.position : 0,
+      createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    };
+  }
+
+  function taskToRow(task, userId, position) {
+    return {
+      id: task.id,
+      user_id: userId,
+      title: task.title,
+      notes: task.notes || "",
+      priority: task.priority || "medium",
+      due_date: task.dueDate || null,
+      category: task.category || "",
+      completed: Boolean(task.completed),
+      position: typeof position === "number" ? position : task.position || 0,
+    };
+  }
+
+  function updateSyncUI() {
+    if (state.syncing) {
+      el.syncDot.className = "sync-dot syncing";
+      el.syncStatusText.textContent = "Syncing with Supabase...";
+      return;
+    }
+
+    if (state.user) {
+      el.syncDot.className = "sync-dot synced";
+      el.syncStatusText.textContent = `Synced to Supabase · ${state.user.email || "Signed in"}`;
+      el.authOpenBtn.hidden = true;
+      el.signoutBtn.hidden = false;
+      el.footerStorageNote.textContent = "Synced securely with Supabase";
+      return;
+    }
+
+    el.syncDot.className = "sync-dot";
+    el.syncStatusText.textContent = state.supabase
+      ? "Local mode · Sign in to sync across devices"
+      : "Local mode · Offline or Supabase unavailable";
+    el.authOpenBtn.hidden = !state.supabase;
+    el.signoutBtn.hidden = true;
+    el.footerStorageNote.textContent = "Saved automatically in your browser";
   }
 
   function initTheme() {
@@ -218,14 +291,12 @@
     li.dataset.id = task.id;
     li.draggable = state.sortBy === "manual";
 
-    // Drag handle
     const handle = document.createElement("span");
     handle.className = "drag-handle";
     handle.title = state.sortBy === "manual" ? "Drag to reorder" : "Switch sort to Manual Order to drag";
     handle.innerHTML =
       '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
 
-    // Checkbox
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.className = "task-checkbox";
@@ -233,7 +304,6 @@
     checkbox.setAttribute("aria-label", `Mark "${task.title}" as ${task.completed ? "incomplete" : "complete"}`);
     checkbox.addEventListener("change", () => toggleTask(task.id));
 
-    // Content
     const content = document.createElement("div");
     content.className = "task-content";
 
@@ -278,7 +348,6 @@
 
     content.appendChild(badges);
 
-    // Actions
     const actions = document.createElement("div");
     actions.className = "task-actions";
 
@@ -303,7 +372,6 @@
     actions.append(editBtn, deleteBtn);
     li.append(handle, checkbox, content, actions);
 
-    // Drag and drop events
     li.addEventListener("dragstart", (e) => {
       if (state.sortBy !== "manual") {
         e.preventDefault();
@@ -345,6 +413,7 @@
   function render() {
     renderCategoryFilter();
     renderStats();
+    updateSyncUI();
 
     const visible = getFilteredTasks();
     el.taskList.innerHTML = "";
@@ -368,10 +437,47 @@
     }
   }
 
-  function addTask(e) {
+  async function syncCloudTasks() {
+    if (!state.supabase || !state.user) return;
+    state.syncing = true;
+    updateSyncUI();
+
+    try {
+      const guestTasks = loadLocalTasks();
+      if (guestTasks.length > 0) {
+        const rows = guestTasks.map((t, index) => taskToRow({ ...t, id: createId() }, state.user.id, index));
+        const { error: migrateError } = await state.supabase.from("tasks").insert(rows);
+        if (!migrateError) {
+          localStorage.removeItem(STORAGE_KEY);
+          showToast(`Synced ${rows.length} local ${rows.length === 1 ? "task" : "tasks"} to your account`);
+        }
+      }
+
+      const { data, error } = await state.supabase
+        .from("tasks")
+        .select("*")
+        .order("position", { ascending: true })
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      state.tasks = (data || []).map(rowToTask);
+    } catch (err) {
+      showToast(`Sync failed: ${err.message || "Unknown error"}`);
+    } finally {
+      state.syncing = false;
+      render();
+    }
+  }
+
+  async function addTask(e) {
     e.preventDefault();
     const title = el.taskTitle.value.trim();
     if (!title) return;
+
+    const minPos = state.tasks.reduce(
+      (min, t) => Math.min(min, typeof t.position === "number" ? t.position : 0),
+      0
+    );
 
     const newTask = {
       id: createId(),
@@ -381,57 +487,163 @@
       category: el.taskCategory.value.trim(),
       notes: el.taskNotes.value.trim(),
       completed: false,
+      position: minPos - 1,
       createdAt: Date.now(),
     };
 
     state.tasks.unshift(newTask);
-    saveTasks();
+    saveLocalTasks();
     render();
 
     el.taskForm.reset();
     el.taskPriority.value = "medium";
     el.taskTitle.focus();
+
+    if (state.supabase && state.user) {
+      const { data, error } = await state.supabase
+        .from("tasks")
+        .insert(taskToRow(newTask, state.user.id, newTask.position))
+        .select()
+        .single();
+
+      if (error) {
+        state.tasks = state.tasks.filter((t) => t.id !== newTask.id);
+        render();
+        showToast(`Could not save task: ${error.message}`);
+        return;
+      }
+
+      if (data) {
+        const idx = state.tasks.findIndex((t) => t.id === newTask.id);
+        if (idx !== -1) state.tasks[idx] = rowToTask(data);
+        render();
+      }
+    }
   }
 
-  function toggleTask(id) {
+  async function toggleTask(id) {
     const task = state.tasks.find((t) => t.id === id);
     if (!task) return;
-    task.completed = !task.completed;
-    saveTasks();
+
+    const previous = task.completed;
+    task.completed = !previous;
+    saveLocalTasks();
     render();
+
+    if (state.supabase && state.user) {
+      const { error } = await state.supabase
+        .from("tasks")
+        .update({ completed: task.completed })
+        .eq("id", id);
+
+      if (error) {
+        task.completed = previous;
+        render();
+        showToast(`Could not update task: ${error.message}`);
+      }
+    }
   }
 
-  function deleteTask(id) {
+  async function deleteTask(id) {
     const index = state.tasks.findIndex((t) => t.id === id);
     if (index === -1) return;
 
-    state.undoSnapshot = [...state.tasks];
     const [removed] = state.tasks.splice(index, 1);
-    saveTasks();
+    saveLocalTasks();
     render();
-    showToast(`Deleted "${removed.title}"`, true);
+
+    const restore = async () => {
+      state.tasks.splice(Math.min(index, state.tasks.length), 0, removed);
+      saveLocalTasks();
+      render();
+      if (state.supabase && state.user) {
+        const { error } = await state.supabase
+          .from("tasks")
+          .insert(taskToRow(removed, state.user.id, removed.position));
+        if (error) {
+          showToast(`Undo failed: ${error.message}`);
+          await syncCloudTasks();
+        }
+      }
+    };
+
+    if (state.supabase && state.user) {
+      const { error } = await state.supabase.from("tasks").delete().eq("id", id);
+      if (error) {
+        state.tasks.splice(index, 0, removed);
+        render();
+        showToast(`Could not delete task: ${error.message}`);
+        return;
+      }
+    }
+
+    showToast(`Deleted "${removed.title}"`, restore);
   }
 
-  function clearCompleted() {
-    const completedCount = state.tasks.filter((t) => t.completed).length;
-    if (completedCount === 0) return;
+  async function clearCompleted() {
+    const removedTasks = state.tasks.filter((t) => t.completed);
+    if (removedTasks.length === 0) return;
 
-    state.undoSnapshot = [...state.tasks];
+    const previousTasks = [...state.tasks];
     state.tasks = state.tasks.filter((t) => !t.completed);
-    saveTasks();
+    saveLocalTasks();
     render();
-    showToast(`Cleared ${completedCount} completed ${completedCount === 1 ? "task" : "tasks"}`, true);
+
+    const restore = async () => {
+      state.tasks = previousTasks;
+      saveLocalTasks();
+      render();
+      if (state.supabase && state.user) {
+        const rows = removedTasks.map((t) => taskToRow(t, state.user.id, t.position));
+        const { error } = await state.supabase.from("tasks").insert(rows);
+        if (error) {
+          showToast(`Undo failed: ${error.message}`);
+          await syncCloudTasks();
+        }
+      }
+    };
+
+    if (state.supabase && state.user) {
+      const ids = removedTasks.map((t) => t.id);
+      const { error } = await state.supabase.from("tasks").delete().in("id", ids);
+      if (error) {
+        state.tasks = previousTasks;
+        render();
+        showToast(`Could not clear completed: ${error.message}`);
+        return;
+      }
+    }
+
+    showToast(
+      `Cleared ${removedTasks.length} completed ${removedTasks.length === 1 ? "task" : "tasks"}`,
+      restore
+    );
   }
 
-  function reorderTasks(sourceId, targetId) {
+  async function reorderTasks(sourceId, targetId) {
     const fromIdx = state.tasks.findIndex((t) => t.id === sourceId);
     const toIdx = state.tasks.findIndex((t) => t.id === targetId);
     if (fromIdx === -1 || toIdx === -1) return;
 
+    const previousTasks = [...state.tasks];
     const [moved] = state.tasks.splice(fromIdx, 1);
     state.tasks.splice(toIdx, 0, moved);
-    saveTasks();
+    state.tasks.forEach((task, idx) => {
+      task.position = idx;
+    });
+
+    saveLocalTasks();
     render();
+
+    if (state.supabase && state.user) {
+      const updates = state.tasks.map((t, idx) => taskToRow(t, state.user.id, idx));
+      const { error } = await state.supabase.from("tasks").upsert(updates, { onConflict: "id" });
+      if (error) {
+        state.tasks = previousTasks;
+        render();
+        showToast(`Could not save order: ${error.message}`);
+      }
+    }
   }
 
   function openEditModal(id) {
@@ -453,7 +665,7 @@
     el.editModal.hidden = true;
   }
 
-  function saveEdit(e) {
+  async function saveEdit(e) {
     e.preventDefault();
     const id = el.editId.value;
     const task = state.tasks.find((t) => t.id === id);
@@ -462,39 +674,61 @@
     const updatedTitle = el.editTitle.value.trim();
     if (!updatedTitle) return;
 
+    const snapshot = { ...task };
     task.title = updatedTitle;
     task.priority = el.editPriority.value || "medium";
     task.dueDate = el.editDue.value || "";
     task.category = el.editCategory.value.trim();
     task.notes = el.editNotes.value.trim();
 
-    saveTasks();
+    saveLocalTasks();
     closeEditModal();
     render();
+
+    if (state.supabase && state.user) {
+      const { error } = await state.supabase
+        .from("tasks")
+        .update({
+          title: task.title,
+          priority: task.priority,
+          due_date: task.dueDate || null,
+          category: task.category,
+          notes: task.notes,
+        })
+        .eq("id", id);
+
+      if (error) {
+        Object.assign(task, snapshot);
+        render();
+        showToast(`Could not update task: ${error.message}`);
+        return;
+      }
+    }
+
     showToast("Task updated");
   }
 
-  function showToast(message, canUndo = false) {
+  function showToast(message, undoCallback = null) {
     if (state.toastTimer) {
       clearTimeout(state.toastTimer);
     }
+    state.undoAction = undoCallback;
     el.toastMessage.textContent = message;
-    el.toastAction.hidden = !canUndo;
+    el.toastAction.hidden = !undoCallback;
     el.toast.hidden = false;
 
     state.toastTimer = setTimeout(() => {
       el.toast.hidden = true;
-      state.undoSnapshot = null;
+      state.undoAction = null;
     }, 4500);
   }
 
-  function handleUndo() {
-    if (!state.undoSnapshot) return;
-    state.tasks = state.undoSnapshot;
-    state.undoSnapshot = null;
-    saveTasks();
-    render();
+  async function handleUndo() {
+    if (!state.undoAction) return;
+    const action = state.undoAction;
+    state.undoAction = null;
     el.toast.hidden = true;
+    await action();
   }
 
   function exportTasks() {
@@ -516,36 +750,172 @@
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(String(reader.result));
         if (!Array.isArray(parsed)) throw new Error("Invalid format");
 
         const valid = parsed
           .filter((item) => item && typeof item.title === "string" && item.title.trim())
-          .map((item) => ({
-            id: typeof item.id === "string" ? item.id : createId(),
+          .map((item, idx) => ({
+            id: createId(),
             title: item.title.trim().slice(0, 200),
             priority: ["high", "medium", "low"].includes(item.priority) ? item.priority : "medium",
             dueDate: typeof item.dueDate === "string" ? item.dueDate : "",
             category: typeof item.category === "string" ? item.category.trim().slice(0, 30) : "",
             notes: typeof item.notes === "string" ? item.notes.trim().slice(0, 300) : "",
             completed: Boolean(item.completed),
+            position: idx,
             createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(),
           }));
 
-        state.undoSnapshot = [...state.tasks];
-        state.tasks = valid;
-        saveTasks();
-        render();
-        showToast(`Imported ${valid.length} tasks`, true);
-      } catch {
-        showToast("Could not import file: invalid JSON");
+        if (state.supabase && state.user) {
+          const rows = valid.map((t, idx) => taskToRow(t, state.user.id, idx));
+          const { error } = await state.supabase.from("tasks").insert(rows);
+          if (error) throw error;
+          await syncCloudTasks();
+          showToast(`Imported ${valid.length} tasks to Supabase`);
+        } else {
+          const previous = [...state.tasks];
+          state.tasks = valid;
+          saveLocalTasks();
+          render();
+          showToast(`Imported ${valid.length} tasks`, () => {
+            state.tasks = previous;
+            saveLocalTasks();
+            render();
+          });
+        }
+      } catch (err) {
+        showToast(`Could not import file: ${err.message || "invalid JSON"}`);
       } finally {
         el.importInput.value = "";
       }
     };
     reader.readAsText(file);
+  }
+
+  // Auth modal helpers
+  function setAuthMode(mode) {
+    state.authMode = mode;
+    el.authModeTabs.forEach((btn) => {
+      const active = btn.dataset.authMode === mode;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", String(active));
+    });
+    el.authFeedback.hidden = true;
+    el.authPassword.setAttribute(
+      "autocomplete",
+      mode === "signup" ? "new-password" : "current-password"
+    );
+    el.authHint.textContent =
+      mode === "signup"
+        ? "Create an account to save your tasks privately in Supabase."
+        : "Sign in to access your tasks from any device.";
+    el.authSubmitBtn.textContent = mode === "signup" ? "Create Account" : "Sign In";
+  }
+
+  function openAuthModal() {
+    setAuthMode("signin");
+    el.authForm.reset();
+    el.authFeedback.hidden = true;
+    el.authModal.hidden = false;
+    el.authEmail.focus();
+  }
+
+  function closeAuthModal() {
+    el.authModal.hidden = true;
+  }
+
+  function showAuthFeedback(message, isSuccess = false) {
+    el.authFeedback.textContent = message;
+    el.authFeedback.className = `auth-feedback${isSuccess ? " success" : ""}`;
+    el.authFeedback.hidden = false;
+  }
+
+  async function handleAuthSubmit(e) {
+    e.preventDefault();
+    if (!state.supabase) return;
+
+    const email = el.authEmail.value.trim();
+    const password = el.authPassword.value;
+    if (!email || !password) return;
+
+    el.authSubmitBtn.disabled = true;
+    el.authFeedback.hidden = true;
+
+    try {
+      if (state.authMode === "signup") {
+        const { data, error } = await state.supabase.auth.signUp({ email, password });
+        if (error) throw error;
+
+        if (data.session) {
+          closeAuthModal();
+          showToast("Account created and signed in");
+        } else {
+          showAuthFeedback(
+            "Account created! Check your email inbox for a confirmation link, then sign in.",
+            true
+          );
+        }
+      } else {
+        const { error } = await state.supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        closeAuthModal();
+        showToast("Signed in to Supabase");
+      }
+    } catch (err) {
+      showAuthFeedback(err.message || "Authentication failed");
+    } finally {
+      el.authSubmitBtn.disabled = false;
+    }
+  }
+
+  async function handleSignOut() {
+    if (!state.supabase) return;
+    const { error } = await state.supabase.auth.signOut();
+    if (error) {
+      showToast(`Sign out failed: ${error.message}`);
+      return;
+    }
+    state.user = null;
+    state.tasks = loadLocalTasks();
+    render();
+    showToast("Signed out · switched to local mode");
+  }
+
+  async function initSupabase() {
+    const config = window.TASKFLOW_SUPABASE_CONFIG;
+    if (!window.supabase || !config || !config.url || !config.publishableKey) {
+      updateSyncUI();
+      return;
+    }
+
+    state.supabase = window.supabase.createClient(config.url, config.publishableKey);
+
+    state.supabase.auth.onAuthStateChange((_event, session) => {
+      const nextUser = session ? session.user : null;
+      const prevUserId = state.user ? state.user.id : null;
+      const nextUserId = nextUser ? nextUser.id : null;
+      state.user = nextUser;
+
+      if (nextUserId && nextUserId !== prevUserId) {
+        syncCloudTasks();
+      } else if (!nextUserId && prevUserId) {
+        state.tasks = loadLocalTasks();
+        render();
+      } else {
+        updateSyncUI();
+      }
+    });
+
+    const { data } = await state.supabase.auth.getSession();
+    state.user = data && data.session ? data.session.user : null;
+    if (state.user) {
+      await syncCloudTasks();
+    } else {
+      updateSyncUI();
+    }
   }
 
   function bindEvents() {
@@ -554,6 +924,18 @@
     el.importInput.addEventListener("change", importTasks);
     el.taskForm.addEventListener("submit", addTask);
     el.clearCompletedBtn.addEventListener("click", clearCompleted);
+
+    el.authOpenBtn.addEventListener("click", openAuthModal);
+    el.signoutBtn.addEventListener("click", handleSignOut);
+    el.closeAuthBtn.addEventListener("click", closeAuthModal);
+    el.cancelAuthBtn.addEventListener("click", closeAuthModal);
+    el.authModal.addEventListener("click", (e) => {
+      if (e.target === el.authModal) closeAuthModal();
+    });
+    el.authForm.addEventListener("submit", handleAuthSubmit);
+    el.authModeTabs.forEach((btn) => {
+      btn.addEventListener("click", () => setAuthMode(btn.dataset.authMode));
+    });
 
     el.tabBtns.forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -605,9 +987,15 @@
           target.tagName === "TEXTAREA" ||
           target.tagName === "SELECT");
 
-      if (e.key === "Escape" && !el.editModal.hidden) {
-        closeEditModal();
-        return;
+      if (e.key === "Escape") {
+        if (!el.editModal.hidden) {
+          closeEditModal();
+          return;
+        }
+        if (!el.authModal.hidden) {
+          closeAuthModal();
+          return;
+        }
       }
 
       if (isTyping) return;
@@ -629,9 +1017,10 @@
       month: "long",
       day: "numeric",
     });
-    state.tasks = loadTasks();
+    state.tasks = loadLocalTasks();
     bindEvents();
     render();
+    initSupabase();
   }
 
   init();
